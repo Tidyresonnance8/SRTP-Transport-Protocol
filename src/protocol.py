@@ -32,28 +32,29 @@ def empackage(packet_type, window, seqnum,timestamp, payload = b""):
         return None
     
 def depackage(segment):
-    try:
-        if len(segment) < 12:
-            return None
-        header_bytes = segment[:12]
-        bloc_32, timestamp, crc1_recu = struct.unpack("!III", header_bytes)
-        seqnum = bloc_32 & 0x7FF
-        longueur = (bloc_32 >> 11) & 0x1FFF
-        window = (bloc_32 >> 24) & 0x3F
-        pack_type = (bloc_32 >> 30) 
-
-        crc1_calcule = zlib.crc32(segment[:8]) & 0xFFFFFFFF
-        if crc1_calcule != crc1_recu:
-            return None
-        if longueur > 0:
-            payload = segment[12:12+longueur]
-            crc2_bytes = segment[12 + longueur : 12 + longueur + 4]
-            crc2_recu = struct.unpack("!I",crc2_bytes)[0]
-            if crc2_recu != crc2_bytes:
-               return None
-        return (pack_type,window,seqnum,timestamp,payload)
-    except Exception:
+    #try:
+    if len(segment) < 12:
         return None
+    header_bytes = segment[:12]
+    bloc_32, timestamp, crc1_recu = struct.unpack("!III", header_bytes)
+    seqnum = bloc_32 & 0x7FF
+    longueur = (bloc_32 >> 11) & 0x1FFF
+    window = (bloc_32 >> 24) & 0x3F
+    pack_type = (bloc_32 >> 30) 
+
+    crc1_calcule = zlib.crc32(segment[:8]) & 0xFFFFFFFF
+    if crc1_calcule != crc1_recu:
+        return None
+    if longueur > 0:
+        payload = segment[12:12+longueur]
+        crc2_bytes = segment[12 + longueur : 12 + longueur + 4]
+        crc2_recu = struct.unpack("!I",crc2_bytes)[0]
+        crc2_calcule = zlib.crc32(payload) & 0xFFFFFFFF
+        if crc2_recu != crc2_calcule:
+            return None
+    return (pack_type,window,seqnum,timestamp,payload)
+    #except Exception:
+        #return None
 
 
 if __name__ == "__main__":
