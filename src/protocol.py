@@ -45,6 +45,7 @@ def depackage(segment):
     crc1_calcule = zlib.crc32(segment[:8]) & 0xFFFFFFFF
     if crc1_calcule != crc1_recu:
         return None
+    payload = b""
     if longueur > 0:
         payload = segment[12:12+longueur]
         crc2_bytes = segment[12 + longueur : 12 + longueur + 4]
@@ -57,45 +58,23 @@ def depackage(segment):
         #return None
 
 
-if __name__ == "__main__":
-    print("--- DÉBUT DES TESTS DU PROTOCOLE ---")
-    
-    # Paramètres de test
-    p_type = PTYPE_DATA
-    win = 32
-    seq = 123
-    ts = 456789
-    message = b"Bonjour SRTP!" # 13 octets
+def encode_sack(liste_seqnums):
+    if not liste_seqnums:
+        return b""
+    bit_string = "".join(format(s,'011b') for s in liste_seqnums)
+    reste = len(bit_string) % 32
+    if reste != 0:
+        bit_string += '0' * (32 - reste)
+    return int(bit_string,2).to_bytes(len(bit_string) // 8, byteorder = 'big')
 
-    try:
-        # ÉTAPE 1 : Empaquetage
-        print(f"\n[Test 1] Création d'un paquet DATA (Seq: {seq})...")
-        paquet_brut = empackage(p_type, win, seq, ts, message)
-        print(f"-> Paquet créé ! Taille totale : {len(paquet_brut)} octets")
-
-        # ÉTAPE 2 : Dépaquetage (Le "Round-Trip")
-        print("[Test 2] Décodage du paquet...")
-        resultat = depackage(paquet_brut)
-
-        if resultat:
-            res_type, res_win, res_seq, res_ts, res_payload = resultat
-            
-            # ÉTAPE 3 : Vérification des valeurs
-            print("\n--- RÉSULTATS ---")
-            print(f"Type :    {res_type} (Attendu: {p_type})")
-            print(f"Window :  {res_win} (Attendu: {win})")
-            print(f"Seqnum :  {res_seq} (Attendu: {seq})")
-            print(f"Payload : {res_payload.decode()} (Attendu: {message.decode()})")
-            
-            if res_seq == seq and res_payload == message:
-                print("\n TEST RÉUSSI : Les données sont identiques !")
-            else:
-                print("\n ÉCHEC : Les données ont changé pendant le transport simulé.")
-        else:
-            print("\n ÉCHEC : depackage() a renvoyé None (CRC invalide ?)")
-
-    except Exception as e:
-        print(f"\n ERREUR CRITIQUE : {e}")
-
-
+def decode_sack(payload):
+    if not payload:
+        return []
+    bit_string = bin(int.from_bytes(payload, byteorder='big'))[2:].zfill(len(payload) * 8)
+    seqnums = []
+    for i in range(0, len(bit_string) - 10, 11):
+        morceau = bit_string[i:i+11]
+        if len(morceau) == 11:
+            seqnums.append(int(morceau,2))
+    return seqnums
 
