@@ -1,83 +1,95 @@
 import socket
 import sys
-import protocol 
+import argparse
+import protocol
 from urllib.parse import urlparse
 import random
+import time
 
-def create_socket_and_send_message(server_addr: str, port: int, path: str) -> int:
+
+def create_socket_and_send_message(server_addr: str, port: int, path: str, save_path: str) -> int:
     with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as sock:
         sock.connect((server_addr, port))
-        # requête HTTP 0.9
+
+        # Requête HTTP 0.9
         request = ("GET " + path).encode('ascii')
-        packet = protocol.empackage(protocol.PTYPE_DATA,63,0,12345,request)
+        ts_envoi = int(time.time() * 1000) % (2**32)
+        packet = protocol.empackage(protocol.PTYPE_DATA, 63, 0, ts_envoi, request)
         sock.send(packet)
+
         buffer = {}
         seqnum_attendu = 0
-        with open("llm.model", "wb") as file:
+        sock.settimeout(5.0)  # timeout global pour éviter boucle infinie
+
+        # BUG FIX #4 : utiliser save_path au lieu de "llm.model" en dur
+        with open(save_path, "wb") as file:
             while True:
-                data, peer_addr = sock.recvfrom(1040)
-                # sabotage du packet
-                if random.random() < 0.2: #je donne 20% de chance de perdre le paquet
-                    print("le client a 'perdu' ce paquet !")
+                try:
+                    data, peer_addr = sock.recvfrom(1040)
+                except socket.timeout:
+                    # Retransmettre la requête initiale si rien reçu
+                    ts_envoi = int(time.time() * 1000) % (2**32)
+                    packet = protocol.empackage(protocol.PTYPE_DATA, 63, 0, ts_envoi, request)
+                    sock.send(packet)
                     continue
-                # fin de sabotage
+
                 packet = protocol.depackage(data)
-                if packet is not None:
-                    pack_type, window, seqnum, timestamp, payload = packet
-                    if pack_type == protocol.PTYPE_DATA:
-                        if seqnum == seqnum_attendu:
-                            if payload == b"":
-                                packet_new = protocol.empackage(
-                                    protocol.PTYPE_ACK,
-                                        window,
-                                        seqnum_attendu,
-                                        timestamp,
-                                        b""
-                                )
-                                sock.send(packet_new)
-                                break
-                            
-                            file.write(payload)
-                            seqnum_attendu = (seqnum_attendu+1)%2048
-                            # je vide le buffer si les paquets suivant sont déjà là
-                            while seqnum_attendu in buffer:
-                                file.write(buffer[seqnum_attendu])
-                                del buffer[seqnum_attendu] # On retire du buffer
-                                seqnum_attendu = (seqnum_attendu+1)%2048
-                        else:
-                            # c'est un paquet du futur on le sauvegarde
-                            buffer[seqnum] = payload
-                        # Envoi de l'acquittement ACK ou SACK
-                        if len(buffer) == 0:
-                            # Ici tout est en ordre on envoit l'ACK
-                            packet_new = protocol.empackage(
-                                protocol.PTYPE_ACK,
-                                window,
-                                seqnum_attendu,
-                                timestamp,
-                                b""
-                            )
-                            sock.send(packet_new)
-                        else:
-                            # on a des paquets en attente, on envoie un SACK
-                            list_key = list(buffer.keys())
-                            payload_s = protocol.encode_sack(list_key)
-                            packet_new = protocol.empackage(
-                                protocol.PTYPE_SACK,
-                                window,
-                                seqnum_attendu,
-                                timestamp,
-                                payload_s
-                            )
-                            sock.send(packet_new)
-        print("Fichier llm.model téléchargé et sauvegardé avec succès !")
-        
+                if packet is None:
+                    continue
+
+                pack_type, window, seqnum, timestamp, payload = packet
+
+                if pack_type == protocol.PTYPE_DATA:
+                    # BUG FIX #5 : détecter fin de transfert même si seqnum != seqnum_attendu
+                    # La spec dit : paquet vide = fin de connexion
+                    if payload == b"":
+                        # Envoyer un ACK final et terminer
+                        ts_ack = int(time.time() * 1000) % (2**32)
+                        pkt_ack = protocol.empackage(
+                            protocol.PTYPE_ACK, 63, seqnum_attendu, ts_ack, b""
+                        )
+                        sock.send(pkt_ack)
+                        break
+
+                    if seqnum == seqnum_attendu:
+                        file.write(payload)
+                        seqnum_attendu = (seqnum_attendu + 1) % 2048
+                        # Vider le buffer des paquets suivants déjà reçus
+                        while seqnum_attendu in buffer:
+                            file.write(buffer[seqnum_attendu])
+                            del buffer[seqnum_attendu]
+                            seqnum_attendu = (seqnum_attendu + 1) % 2048
+                    else:
+                        # Paquet hors-séquence : on le met en buffer
+                        buffer[seqnum] = payload
+
+                    # Envoyer ACK ou SACK
+                    ts_ack = int(time.time() * 1000) % (2**32)
+                    if len(buffer) == 0:
+                        pkt_ack = protocol.empackage(
+                            protocol.PTYPE_ACK, 63, seqnum_attendu, ts_ack, b""
+                        )
+                        sock.send(pkt_ack)
+                    else:
+                        list_key = list(buffer.keys())
+                        payload_s = protocol.encode_sack(list_key)
+                        pkt_sack = protocol.empackage(
+                            protocol.PTYPE_SACK, 63, seqnum_attendu, ts_ack, payload_s
+                        )
+                        sock.send(pkt_sack)
+
+        print(f"Fichier sauvegardé dans {save_path}", file=sys.stderr)
+
 
 if __name__ == "__main__":
-    url = sys.argv[1]
-    parsed = urlparse(url)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('url')
+    parser.add_argument('--save', default='llm.model', help='Chemin de sauvegarde')
+    args = parser.parse_args()
+
+    parsed = urlparse(args.url)
     server_addr = parsed.hostname
     port = parsed.port
     path = parsed.path
 
-    create_socket_and_send_message(server_addr,port,path)
+    create_socket_and_send_message(server_addr, port, path, args.save)
