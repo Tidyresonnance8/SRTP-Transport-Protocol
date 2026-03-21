@@ -1,6 +1,5 @@
 import pytest
 import protocol
-import random
 
 def test_basique():
     payload = b"hello"
