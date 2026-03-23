@@ -1,5 +1,6 @@
 import os
 import sys
+import random
 import socket
 import threading
 from Helpers import *
@@ -26,6 +27,14 @@ class UDPCapturingProxy:
     le contenu du fichier dans self.received_data (bytes ordonnés) avec
     uniquement les paquets pour lesquels le client a renvoyé un ACK.
 
+    Réseau imparfait (activé via imperfect_network=True) :
+        - Chaque paquet (dans les deux sens) a une probabilité CORRUPT_PROB
+        d'être corrompu (un octet aléatoire est altéré) avant transmission.
+        - Chaque paquet a une probabilité DROP_PROB d'être totalement perdu
+        (ni transmis, ni mémorisé dans _pending/_chunks).
+        - Les deux événements sont indépendants ; un paquet peut être à la
+        fois corrompu ET perdu (dans ce cas il est simplement supprimé).
+
     Usage :
         proxy = UDPCapturingProxy(server_port)
         proxy.start()
@@ -35,9 +44,15 @@ class UDPCapturingProxy:
         data = proxy.get_received_data() # bytes reçus par client_ref
     """
 
-    def __init__(self, server_port: int, host: str = HOST):
+    # Probabilités réseau imparfait
+    CORRUPT_PROB = 0.10   # 10 % de chance de corruption d'un paquet
+    DROP_PROB    = 0.10   # 10 % de chance de perte totale d'un paquet
+    # Combinées : ~1/5 des paquets sont affectés (corrompus OU perdus OU les deux)
+
+    def __init__(self, server_port: int, host: str = HOST, imperfect_network: bool = True):
         self.server_port = server_port
         self.host = host
+        self.imperfect_network = imperfect_network
         self.proxy_port = free_port()
         self._stop_event = threading.Event()
         self._done_event = threading.Event()
@@ -59,6 +74,37 @@ class UDPCapturingProxy:
     def wait_done(self, timeout: float = TIMEOUT_TRANSFER) -> bool:
         """Attend que le transfert soit terminé (paquet DATA vide reçu du serveur)."""
         return self._done_event.wait(timeout=timeout)
+
+    # Simulation réseau imparfait
+
+    def _apply_network_imperfections(self, data: bytes) -> bytes | None:
+        """
+        Applique aléatoirement perte et/ou corruption au paquet.
+
+        Retourne :
+        - None   → paquet perdu (à ignorer, ne pas envoyer ni mémoriser)
+        - bytes  → paquet à transmettre (potentiellement corrompu)
+
+        Un paquet corrompu a un octet choisi aléatoirement modifié par XOR
+        avec une valeur non nulle. Son CRC ne correspondra plus, donc
+        protocol.depackage() le rejettera côté récepteur — ce qui garantit
+        qu'il ne sera jamais stocké dans _pending ni dans _chunks.
+        """
+        dropped   = random.random() < self.DROP_PROB
+        corrupted = random.random() < self.CORRUPT_PROB
+
+        if dropped:
+            # Perte totale : on ne transmet rien
+            return None
+
+        if corrupted and len(data) > 0:
+            # Corruption : altérer un octet aléatoire
+            buf = bytearray(data)
+            idx = random.randrange(len(buf))
+            buf[idx] ^= random.randint(1, 255)   # XOR non nul → octet différent
+            return bytes(buf)
+
+        return data
 
     def get_received_data(self) -> bytes:
         """
@@ -96,6 +142,14 @@ class UDPCapturingProxy:
         vers proxy_port. Il n'y a donc qu'un seul socket nécessaire :
         on distingue client et serveur par l'adresse source de chaque
         paquet entrant.
+
+        Si imperfect_network=True, chaque paquet transite par
+        _apply_network_imperfections() avant d'être relayé :
+        - None  → paquet silencieusement supprimé (perdu)
+        - bytes → paquet transmis (intact ou corrompu)
+        Les paquets corrompus sont transmis tels quels ; le récepteur les
+        détectera via le CRC et les ignorera. Ils ne sont jamais mémorisés
+        dans _pending ni _chunks.
         """
         sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         sock.bind((self.host, self.proxy_port))
@@ -113,15 +167,30 @@ class UDPCapturingProxy:
                     continue
 
                 if client_addr is None or addr == client_addr:
-                    # Paquet venant du client -> relayer vers le serveur et inspecter les ACKs
+                    # Paquet venant du client -> vers le serveur
                     client_addr = addr
-                    sock.sendto(data, server_addr)
-                    self._inspect_client_packet(data)
+                    if self.imperfect_network:
+                        to_send = self._apply_network_imperfections(data)
+                    else:
+                        to_send = data
+                    if to_send is not None:
+                        sock.sendto(to_send, server_addr)
+                        # N'inspecter que le paquet original non corrompu
+                        if to_send == data:
+                            self._inspect_client_packet(data)
+                        # Paquet corrompu : rejeté par le serveur via CRC, rien à mémoriser
                 else:
-                    # Paquet venant du serveur -> relayer vers le client et mettre en attente
-                    if client_addr is not None:
-                        sock.sendto(data, client_addr)
-                    self._inspect_server_packet(data)
+                    # Paquet venant du serveur -> vers le client
+                    if self.imperfect_network:
+                        to_send = self._apply_network_imperfections(data)
+                    else:
+                        to_send = data
+                    if to_send is not None and client_addr is not None:
+                        sock.sendto(to_send, client_addr)
+                    # N'inspecter le paquet serveur que s'il est intact et transmis
+                    if to_send is not None and to_send == data:
+                        self._inspect_server_packet(data)
+                    # Paquet perdu ou corrompu : pas de mémorisation dans _pending/_chunks
 
                 if self._fin_received:
                     self._done_event.set()

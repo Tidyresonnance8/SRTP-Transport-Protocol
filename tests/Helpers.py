@@ -22,7 +22,7 @@ CLIENT_PY   = os.path.join(SRC_DIR, 'client.py')
 SERVER_REF  = os.path.join(TOOLS_DIR, 'server')
 CLIENT_REF  = os.path.join(TOOLS_DIR, 'client')
 
-TIMEOUT_TRANSFER = 60   # secondes max pour un transfert complet
+TIMEOUT_TRANSFER = 20   # secondes max pour un transfert complet
 
 # Dossier de sortie persistant pour les fichiers .txt reçus
 OUTPUT_DIR = pathlib.Path(os.path.join(os.path.dirname(__file__), '..', 'test_outputs'))

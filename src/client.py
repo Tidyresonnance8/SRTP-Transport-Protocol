@@ -23,7 +23,7 @@ def create_socket_and_send_message(server_addr: str, port: int, path: str, save_
         transfer_started = False 
         last_ack_sent = None 
         retransmits_initial = 0
-        MAX_RETRANSMITS_INITIAL = 5  # Max retries before first byte received
+        MAX_RETRANSMITS_INITIAL = 10  # Max retries before first byte received
 
         sock.settimeout(2.0)
 
