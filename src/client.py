@@ -19,18 +19,33 @@ def create_socket_and_send_message(server_addr: str, port: int, path: str, save_
 
         buffer = {}
         seqnum_attendu = 0
-        sock.settimeout(5.0)  # timeout global pour éviter boucle infinie
+        last_data_timestamp = 0  
+        transfer_started = False 
+        last_ack_sent = None 
+        retransmits_initial = 0
+        MAX_RETRANSMITS_INITIAL = 5  # Max retries before first byte received
 
-        # BUG FIX #4 : utiliser save_path au lieu de "llm.model" en dur
+        sock.settimeout(2.0)
+
         with open(save_path, "wb") as file:
             while True:
                 try:
                     data, peer_addr = sock.recvfrom(1040)
+                    retransmits_initial = 0
                 except socket.timeout:
-                    # Retransmettre la requête initiale si rien reçu
-                    ts_envoi = int(time.time() * 1000) % (2**32)
-                    packet = protocol.empackage(protocol.PTYPE_DATA, 63, 0, ts_envoi, request)
-                    sock.send(packet)
+                    if not transfer_started:
+                        # No response yet: retransmit the GET request
+                        retransmits_initial += 1
+                        if retransmits_initial > MAX_RETRANSMITS_INITIAL:
+                            print("Timeout : aucune réponse du serveur, abandon.", file=sys.stderr)
+                            break
+                        ts_envoi = int(time.time() * 1000) % (2**32)
+                        pkt = protocol.empackage(protocol.PTYPE_DATA, 63, 0, ts_envoi, request)
+                        sock.send(pkt)
+                    else:
+                        # Mid-transfer: retransmit our last ACK to prod the server
+                        if last_ack_sent is not None:
+                            sock.send(last_ack_sent)
                     continue
 
                 packet = protocol.depackage(data)
@@ -40,16 +55,17 @@ def create_socket_and_send_message(server_addr: str, port: int, path: str, save_
                 pack_type, window, seqnum, timestamp, payload = packet
 
                 if pack_type == protocol.PTYPE_DATA:
-                    # BUG FIX #5 : détecter fin de transfert même si seqnum != seqnum_attendu
-                    # La spec dit : paquet vide = fin de connexion
                     if payload == b"":
-                        # Envoyer un ACK final et terminer
-                        ts_ack = int(time.time() * 1000) % (2**32)
-                        pkt_ack = protocol.empackage(
-                            protocol.PTYPE_ACK, 63, seqnum_attendu, ts_ack, b""
-                        )
-                        sock.send(pkt_ack)
-                        break
+                        if seqnum == seqnum_attendu:
+                            # Echo the fin packet's timestamp in our final ACK
+                            pkt_ack = protocol.empackage(protocol.PTYPE_ACK, 63, seqnum_attendu, timestamp, b"")
+                            sock.send(pkt_ack)
+                            break
+                        # Paquet vide hors séquence : ignorer
+                        continue
+
+                    transfer_started = True
+                    last_data_timestamp = timestamp
 
                     if seqnum == seqnum_attendu:
                         file.write(payload)
@@ -63,20 +79,16 @@ def create_socket_and_send_message(server_addr: str, port: int, path: str, save_
                         # Paquet hors-séquence : on le met en buffer
                         buffer[seqnum] = payload
 
-                    # Envoyer ACK ou SACK
-                    ts_ack = int(time.time() * 1000) % (2**32)
                     if len(buffer) == 0:
-                        pkt_ack = protocol.empackage(
-                            protocol.PTYPE_ACK, 63, seqnum_attendu, ts_ack, b""
-                        )
+                        pkt_ack = protocol.empackage(protocol.PTYPE_ACK, 63, seqnum_attendu, last_data_timestamp, b"")
                         sock.send(pkt_ack)
+                        last_ack_sent = pkt_ack
                     else:
                         list_key = list(buffer.keys())
                         payload_s = protocol.encode_sack(list_key)
-                        pkt_sack = protocol.empackage(
-                            protocol.PTYPE_SACK, 63, seqnum_attendu, ts_ack, payload_s
-                        )
+                        pkt_sack = protocol.empackage(protocol.PTYPE_SACK, 63, seqnum_attendu, last_data_timestamp, payload_s)
                         sock.send(pkt_sack)
+                        last_ack_sent = pkt_sack
 
         print(f"Fichier sauvegardé dans {save_path}", file=sys.stderr)
 
